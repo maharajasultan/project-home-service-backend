@@ -15,6 +15,7 @@ use App\Http\Controllers\Admin\ReviewController;
 use App\Http\Controllers\Admin\FinanceReportController;
 use App\Http\Controllers\Admin\InventoryReportController;
 use App\Http\Controllers\Admin\TechnicianPerformanceController;
+use App\Http\Controllers\Admin\CompanyProfileController;
 
 Route::get('/', function () {
     return redirect()->route('admin.login');
@@ -40,6 +41,9 @@ Route::prefix('admin')->name('admin.')->group(function () {
     Route::post('login', [LoginController::class, 'login'])->middleware('throttle:5,1')->name('login.submit');
 
     Route::middleware('admin')->group(function () {
+                // ---------- Profil Perusahaan (F6) ----------
+        Route::get('company', [CompanyProfileController::class, 'edit'])->name('company.edit');
+        Route::put('company', [CompanyProfileController::class, 'update'])->name('company.update');
         Route::post('logout', [LoginController::class, 'logout'])->name('logout');
 
         Route::get('dashboard', DashboardController::class)->name('dashboard');
@@ -126,3 +130,25 @@ Route::prefix('admin')->name('admin.')->group(function () {
         Route::get('reports/technicians/export', [TechnicianPerformanceController::class, 'export'])->name('reports.technicians.export');
     });
 });
+
+// Route publik gambar dengan CORS headers lengkap untuk Flutter Web
+Route::get('/images/{path}', function ($path) {
+    $candidates = [
+        public_path('images/' . $path),
+        storage_path('app/public/images/' . $path),
+        storage_path('app/public/' . $path),
+    ];
+    foreach ($candidates as $file) {
+        if (file_exists($file) && !is_dir($file)) {
+            $mime = mime_content_type($file) ?: 'application/octet-stream';
+            return response()->file($file, [
+                'Access-Control-Allow-Origin' => '*',
+                'Access-Control-Allow-Methods' => 'GET, OPTIONS',
+                'Access-Control-Allow-Headers' => '*',
+                'Content-Type' => $mime,
+                'Cache-Control' => 'public, max-age=86400',
+            ]);
+        }
+    }
+    abort(404);
+})->where('path', '.*');

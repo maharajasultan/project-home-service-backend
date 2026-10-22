@@ -20,12 +20,13 @@ use Illuminate\Support\Str;
 class PaymentService
 {
     public const METHOD_LABELS = [
+        'indomaret' => 'Indomaret',
+        'alfamart' => 'Alfamart',
         'bca_va' => 'BCA Virtual Account',
         'echannel' => 'Mandiri Bill Payment',
         'bri_va' => 'BRI Virtual Account',
         'bni_va' => 'BNI Virtual Account',
-        'indomaret' => 'Indomaret',
-        'alfamart' => 'Alfamart',
+        'permata_va' => 'Permata Virtual Account',
     ];
 
     private const FAILED_STATUSES = ['expire', 'cancel', 'deny', 'failure'];
@@ -45,7 +46,6 @@ class PaymentService
         $this->orders->expireOverdue();
 
         return DB::transaction(function () use ($order) {
-            // Kunci baris pesanan agar dua request /pay bersamaan tidak membuat dua transaksi.
             $locked = Order::with(['items', 'user'])->whereKey($order->id)->lockForUpdate()->firstOrFail();
 
             if ($locked->status !== OrderStatus::Pending) {
@@ -64,7 +64,7 @@ class PaymentService
 
             if ($existing) {
                 if ($existing->status === 'pending' && $existing->snap_token) {
-                    return $existing; // idempotent: tautan yang sama
+                    return $existing;
                 }
 
                 throw new BusinessException('Transaksi pembayaran pesanan ini bermasalah. Hubungi admin.');
@@ -83,7 +83,136 @@ class PaymentService
         });
     }
 
-    /** Tanya status ke Midtrans lalu proses seperti notifikasi (dipakai Flutter setelah WebView ditutup). */
+    /**
+     * Buat transaksi pembayaran langsung (Core API) berdasarkan metode yang dipilih,
+     * seperti Indomaret (menghasilkan payment_code untuk Midtrans Simulator) atau Bank VA.
+     *
+     * @throws BusinessException
+     */
+    public function payWithMethod(Order $order, string $method): array
+    {
+        $this->orders->expireOverdue();
+
+        return DB::transaction(function () use ($order, $method) {
+            $locked = Order::with(['items', 'user'])->whereKey($order->id)->lockForUpdate()->firstOrFail();
+
+            if ($locked->status !== OrderStatus::Pending) {
+                throw new BusinessException(
+                    'Pesanan ini tidak dapat dibayar. Mungkin sudah dibayar, dibatalkan, atau melewati batas waktu.'
+                );
+            }
+
+            $remaining = max(0, (int) now()->diffInSeconds($locked->expired_at, false));
+
+            if ($remaining <= 0) {
+                throw new BusinessException('Batas waktu pembayaran telah habis.');
+            }
+
+            $existing = Payment::where('order_id', $locked->id)->latest('id')->first();
+
+            if ($existing && $existing->status === 'pending' && $existing->method === $method && !empty($existing->payload)) {
+                return $this->formatInstruction($locked, $existing->method, (array) $existing->payload, $remaining);
+            }
+
+            $chargeParams = $this->buildChargeParams($locked, $method);
+
+            try {
+                $chargeResult = (array) json_decode(json_encode(\Midtrans\CoreApi::charge($chargeParams)), true);
+            } catch (\Throwable $e) {
+                Log::error('Midtrans CoreApi Charge failed', ['method' => $method, 'order' => $locked->order_code, 'error' => $e->getMessage()]);
+                throw new BusinessException('Gagal memproses metode pembayaran ini: ' . $e->getMessage(), 502);
+            }
+
+            $payment = Payment::updateOrCreate(
+                ['order_id' => $locked->id],
+                [
+                    'midtrans_order_id' => $locked->order_code,
+                    'method' => $method,
+                    'status' => 'pending',
+                    'gross_amount' => $locked->total,
+                    'payload' => $chargeResult,
+                ]
+            );
+
+            return $this->formatInstruction($locked, $method, $chargeResult, $remaining);
+        });
+    }
+
+    private function buildChargeParams(Order $order, string $method): array
+    {
+        $base = [
+            'transaction_details' => [
+                'order_id' => $order->order_code,
+                'gross_amount' => (int) $order->total,
+            ],
+            'customer_details' => [
+                'first_name' => Str::limit($order->user->name, 100, ''),
+                'email' => $order->user->email,
+                'phone' => $order->phone_wa,
+            ],
+        ];
+
+        return match ($method) {
+            'indomaret' => array_merge($base, [
+                'payment_type' => 'cstore',
+                'cstore' => [
+                    'store' => 'Indomaret',
+                    'message' => 'Pembayaran Pesanan Reaple',
+                ],
+            ]),
+            'alfamart' => array_merge($base, [
+                'payment_type' => 'cstore',
+                'cstore' => [
+                    'store' => 'Alfamart',
+                    'message' => 'Pembayaran Pesanan Reaple',
+                ],
+            ]),
+            'bca_va' => array_merge($base, [
+                'payment_type' => 'bank_transfer',
+                'bank_transfer' => ['bank' => 'bca'],
+            ]),
+            'bri_va' => array_merge($base, [
+                'payment_type' => 'bank_transfer',
+                'bank_transfer' => ['bank' => 'bri'],
+            ]),
+            'bni_va' => array_merge($base, [
+                'payment_type' => 'bank_transfer',
+                'bank_transfer' => ['bank' => 'bni'],
+            ]),
+            'echannel' => array_merge($base, [
+                'payment_type' => 'echannel',
+                'echannel' => [
+                    'bill_info1' => 'Payment For:',
+                    'bill_info2' => 'Reaple Service',
+                ],
+            ]),
+            'permata_va' => array_merge($base, [
+                'payment_type' => 'permata',
+            ]),
+            default => array_merge($base, [
+                'payment_type' => 'bank_transfer',
+                'bank_transfer' => ['bank' => 'bca'],
+            ]),
+        };
+    }
+
+    private function formatInstruction(Order $order, string $method, array $payload, int $remaining): array
+    {
+        return [
+            'order_id' => $order->id,
+            'order_code' => $order->order_code,
+            'method' => $method,
+            'amount' => (int) $order->total,
+            'seconds_remaining' => $remaining,
+            'va_number' => $payload['va_numbers'][0]['va_number'] ?? ($payload['permata_va_number'] ?? null),
+            'bill_key' => $payload['bill_key'] ?? null,
+            'biller_code' => $payload['biller_code'] ?? null,
+            'payment_code' => $payload['payment_code'] ?? null,
+            'store' => $payload['store'] ?? ($method === 'indomaret' ? 'indomaret' : ($method === 'alfamart' ? 'alfamart' : null)),
+        ];
+    }
+
+    /** Tanya status ke Midtrans lalu proses seperti notifikasi. */
     public function sync(Order $order): void
     {
         $this->orders->expireOverdue();
@@ -115,7 +244,6 @@ class PaymentService
 
             if (! $payment) {
                 Log::info('Midtrans: order_id tidak dikenal, diabaikan.', ['order_id' => $midtransOrderId]);
-
                 return null;
             }
 
@@ -127,11 +255,9 @@ class PaymentService
                     'expected' => $payment->gross_amount,
                     'received' => $amount,
                 ]);
-
                 return null;
             }
 
-            // Status "settlement" tidak boleh diturunkan oleh notifikasi susulan.
             if (
                 $payment->status === 'settlement'
                 && in_array($status, ['pending', ...self::FAILED_STATUSES], true)
@@ -148,7 +274,7 @@ class PaymentService
             if ($status === 'settlement') {
                 $this->markPaid($payment);
             } elseif (in_array($status, self::FAILED_STATUSES, true)) {
-                $this->orders->release($payment->order_id); // stok kembali, slot bebas
+                $this->orders->release($payment->order_id);
             }
 
             return $payment->refresh();
@@ -160,8 +286,6 @@ class PaymentService
         return self::METHOD_LABELS[$method] ?? ($method ?: 'Midtrans');
     }
 
-    // ------------------------------------------------------------------
-
     private function markPaid(Payment $payment): void
     {
         $order = Order::with('items.product')->whereKey($payment->order_id)->lockForUpdate()->first();
@@ -170,18 +294,16 @@ class PaymentService
             return;
         }
 
-        // Uang masuk setelah pesanan ditandai gagal (balapan di detik terakhir).
         if ($order->status === OrderStatus::Failed && ! $this->revive($order)) {
             Log::critical('Pembayaran masuk untuk pesanan gagal yang tidak bisa dihidupkan. PERLU REFUND MANUAL.', [
                 'order_code' => $order->order_code,
                 'amount' => $order->total,
             ]);
-
             return;
         }
 
         if ($order->status !== OrderStatus::Pending) {
-            return; // sudah diproses (notifikasi ganda)
+            return;
         }
 
         $now = now();
@@ -189,7 +311,6 @@ class PaymentService
         $order->update(['status' => OrderStatus::Paid, 'paid_at' => $now]);
         $payment->update(['paid_at' => $now]);
 
-        // Barang keluar (stok sudah dikurangi saat pesanan dibuat; ini catatan untuk laporan inventory).
         foreach ($order->items as $item) {
             if ($item->product_variant_id && $item->product?->type === ProductType::Sparepart) {
                 StockMovement::create([
@@ -202,7 +323,6 @@ class PaymentService
             }
         }
 
-        // Uang masuk untuk laporan keuangan.
         FinanceTransaction::create([
             'order_id' => $order->id,
             'type' => 'in',
@@ -213,7 +333,6 @@ class PaymentService
         ]);
     }
 
-    /** Hidupkan kembali pesanan gagal jika stok dan slot teknisi masih tersedia. */
     private function revive(Order $order): bool
     {
         $at = $order->scheduled_at;
@@ -246,9 +365,8 @@ class PaymentService
             ]);
         } catch (QueryException $e) {
             if (($e->errorInfo[1] ?? null) === 1062) {
-                return false; // slot sudah diambil orang lain
+                return false;
             }
-
             throw $e;
         }
 
@@ -265,7 +383,6 @@ class PaymentService
     {
         $items = $order->items->map(fn($item) => [
             'id' => 'ITEM-' . $item->id,
-            // Midtrans: harga item = harga barang + ongkir/pengecekan, supaya total item = gross_amount.
             'price' => (int) $item->price + (int) $item->base_fee,
             'quantity' => (int) $item->qty,
             'name' => Str::limit(trim($item->product_name . ' ' . $item->variant_label), 50, ''),
@@ -283,7 +400,6 @@ class PaymentService
                 'phone' => $order->phone_wa,
             ],
             'enabled_payments' => config('midtrans.enabled_payments'),
-            // Dibulatkan ke bawah agar tagihan Midtrans tidak melewati batas pesanan.
             'expiry' => [
                 'unit' => 'minutes',
                 'duration' => max(1, intdiv($remainingSeconds, 60)),
@@ -314,7 +430,7 @@ class PaymentService
                 ? strtolower($n['va_numbers'][0]['bank']) . '_va'
                 : (isset($n['permata_va_number']) ? 'permata_va' : 'bank_transfer'),
             $type === 'cstore' => strtolower((string) ($n['store'] ?? 'cstore')),
-            default => (string) $type, // echannel, dll.
+            default => (string) $type,
         };
     }
 }

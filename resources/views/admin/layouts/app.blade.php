@@ -111,6 +111,8 @@
     ['Laporan Keuangan', 'bi-cash-coin', 'admin.reports.finance', 'admin.reports.finance*'],
     ['Laporan Inventory', 'bi-boxes', 'admin.reports.inventory', 'admin.reports.inventory*'],
     ['Kinerja Teknisi', 'bi-graph-up', 'admin.reports.technicians', 'admin.reports.technicians*'],
+    ['section' => 'Pengaturan'],
+    ['Profil Perusahaan', 'bi-building', 'admin.company.edit', 'admin.company.*'],
     ];
     @endphp
 

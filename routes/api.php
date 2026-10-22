@@ -21,6 +21,8 @@ use App\Http\Controllers\Api\Technician\PhotoController;
 use App\Http\Controllers\Api\Technician\ReviewController as TechnicianReviewController;
 use App\Http\Controllers\Api\Technician\TrackingController;
 use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\Api\AboutController;
+use App\Http\Controllers\Api\ProfileController;
 
 Route::prefix('v1')->group(function () {
 
@@ -38,6 +40,7 @@ Route::prefix('v1')->group(function () {
     // ---------- Katalog (publik) ----------
     Route::middleware('throttle:60,1')->group(function () {
         Route::get('banners', [BannerController::class, 'index']);
+        Route::get('about', [AboutController::class, 'show']);
         Route::get('iphone-models', [IphoneModelController::class, 'index']);
         Route::get('products', [ProductController::class, 'index']);
         Route::get('products/{id}', [ProductController::class, 'show'])->whereNumber('id');
@@ -51,7 +54,11 @@ Route::prefix('v1')->group(function () {
 
         // Badge chat belum dibaca (B7)
         Route::get('chat/unread-count', [ChatController::class, 'unreadCount'])->middleware('throttle:120,1');
-
+        // Profil (semua role) (F6)
+        Route::put('profile', [ProfileController::class, 'update'])->middleware('throttle:30,1');
+        Route::post('profile/avatar', [ProfileController::class, 'avatar'])->middleware('throttle:10,1');
+        Route::delete('profile/avatar', [ProfileController::class, 'destroyAvatar'])->middleware('throttle:10,1');
+        Route::put('profile/password', [ProfileController::class, 'password'])->middleware('throttle:5,1');
         // ---------- Khusus role User (pelanggan) ----------
         Route::middleware('role:user')->group(function () {
             // Keranjang (B3)

@@ -73,6 +73,7 @@ class OrderTrackingController extends Controller
                 'latitude' => $order->latitude,
                 'longitude' => $order->longitude,
                 'address' => $order->address,
+                'district' => $order->district,
             ],
             'scheduled_at' => $order->scheduled_at->toIso8601String(),
             'server_time' => now()->toIso8601String(),

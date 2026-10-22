@@ -16,11 +16,20 @@ class PaymentController extends Controller
     {
     }
 
-    /** POST /api/v1/orders/{id}/pay  -> tautan halaman bayar Midtrans (dibuka di WebView) */
+    /** POST /api/v1/orders/{id}/pay */
     public function pay(Request $request, int $id): JsonResponse
     {
         $order = Order::where('user_id', $request->user()->id)->findOrFail($id);
+        $method = $request->input('payment_method');
 
+        // Jika user memilih metode pembayaran spesifik (seperti Indomaret, BCA VA, dll),
+        // jalankan Midtrans Core API dan kembalikan kode pembayaran langsung.
+        if ($method && in_array($method, array_keys(PaymentService::METHOD_LABELS), true)) {
+            $instruction = $this->payments->payWithMethod($order, $method);
+            return ApiResponse::success($instruction, 'Instruksi pembayaran siap.');
+        }
+
+        // Default: Snap Payment (WebView)
         $payment = $this->payments->pay($order);
         $order->refresh();
 
@@ -32,7 +41,6 @@ class PaymentController extends Controller
             'snap_token' => $payment->snap_token,
             'expired_at' => $order->expired_at?->toIso8601String(),
             'seconds_remaining' => max(0, (int) now()->diffInSeconds($order->expired_at, false)),
-            // Flutter menutup WebView saat URL mengandung teks ini.
             'finish_marker' => '/payment/finish',
             'accepted_methods' => collect(PaymentService::METHOD_LABELS)
                 ->map(fn ($label, $code) => ['code' => $code, 'label' => $label])
@@ -40,7 +48,7 @@ class PaymentController extends Controller
         ], 'Transaksi pembayaran siap.');
     }
 
-    /** POST /api/v1/orders/{id}/payment/sync  -> periksa status ke Midtrans, kembalikan pesanan terbaru */
+    /** POST /api/v1/orders/{id}/payment/sync */
     public function sync(Request $request, int $id): JsonResponse
     {
         $order = Order::where('user_id', $request->user()->id)->findOrFail($id);

@@ -2,13 +2,15 @@
 
 namespace App\Support;
 
-use Illuminate\Support\Facades\Storage;
-
 class MediaUrl
 {
     /**
      * Ubah path penyimpanan menjadi URL publik.
      * Jika sudah berupa URL penuh (http/https), kembalikan apa adanya.
+     * Mengembalikan URL relatif /storage/... yang otomatis bekerja di:
+     * - Web Admin (browser menggunakan host saat ini tanpa bergantung pada port 8000)
+     * - Flutter (ApiConfig.resolveImageUrl otomatis menyematkan baseUrl/storageBaseUrl yang aktif)
+     * - Laragon Apache (port 80), php artisan serve, Android emulator (10.0.2.2), maupun IP jaringan LAN
      */
     public static function resolve(?string $path): ?string
     {
@@ -20,6 +22,11 @@ class MediaUrl
             return $path;
         }
 
-        return Storage::disk('public')->url($path);
+        $cleanPath = ltrim(str_replace('\\', '/', $path), '/');
+        if (str_starts_with($cleanPath, 'storage/')) {
+            $cleanPath = substr($cleanPath, 8);
+        }
+
+        return '/storage/' . $cleanPath;
     }
 }
